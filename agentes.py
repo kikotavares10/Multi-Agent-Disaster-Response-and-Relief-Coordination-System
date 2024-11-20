@@ -5,7 +5,6 @@ from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 import ast  # Para usar ast.literal_eval
-from ambiente import Environment
 import asyncio
 from pathfinding import a_star
 
@@ -22,55 +21,88 @@ class ResponderAgent(Agent):
             2: []
         }
 
+        self.message_buffer = {  # Buffer compartilhado para mensagens
+            "request": [],
+            "inform": [],
+            "confirm": []
+        }
+
+    class MessageRouterBehaviour(CyclicBehaviour):
+        async def run(self):
+            msg = await self.receive(timeout=5)  # Aguarda mensagens com timeout
+            if msg:
+                print(f"Roteador recebeu: {msg}")
+
+                # Verifica o tipo de mensagem com base no performative
+                performative = msg.get_metadata("performative")
+
+                if performative == "request":
+                    # Adiciona a mensagem de pedido ao buffer
+                    self.agent.message_buffer["request"].append(msg)
+
+                elif performative == "inform":
+                    # Adiciona a mensagem de inform ao buffer
+                    self.agent.message_buffer["inform"].append(msg)
+
+                else:
+                    print(f"Mensagem desconhecida: {msg.body}")
+
     class ResponderBehaviour(CyclicBehaviour):
         async def run(self):
-            print("Aguardando solicitações de ajuda...")
+            #print("Verificando solicitações no buffer de mensagens...")
 
-            # Recebe a mensagem de pedido de ajuda
-            msg = await self.receive(timeout=10)
-            if msg and msg.get_metadata("performative") == "request":
-                parts = msg.body.split()
-                #print("PARTS: ", parts)
+            # Itera sobre as mensagens no buffer de "request"
+            for msg in self.agent.message_buffer["request"]:
+                #print("MENSAGEMMMM: ",msg)
+                #print("ID: ",str(self.agent.jid))
+                if str(self.agent.jid) == str(msg.to):  # Verifica se a mensagem é destinada ao agente atual
+                    #print ("touuuuuuuu")
+                    print(f"Mensagem destinada ao agente: {msg}")
 
-                # Extrai grau de urgência e posição
-                grau = int(parts[7])  # Grau de urgência no índice 7
-                position = eval(" ".join(parts[3:5]))  # Extrai posição dos índices 3 e 4
+                    # Processa a mensagem
+                    parts = msg.body.split()
+                    grau = int(parts[7])  # Grau de urgência no índice 7
+                    position = eval(" ".join(parts[3:5]))  # Extrai posição dos índices 3 e 4
+                    civilian_id = str(msg.sender)
 
-                # Obtém o ID do Civilian
-                civilian_id = str(msg.sender)
+                    # Verifica e organiza os graus
+                    if grau >= 3:
+                        for lower_grau in range(2, grau):
+                            if lower_grau in self.agent.pedidos:
+                                for pedido in self.agent.pedidos[lower_grau]:
+                                    if pedido["position"] == position:
+                                        self.agent.pedidos[lower_grau].remove(pedido)
+                                        print(f"Pedido removido do grau {lower_grau}: {pedido}")
+                                        break
 
-                # Verifica se o grau é >= 3
-                if grau >= 3:
-                    # Percorre os graus abaixo do atual
-                    for lower_grau in range(2, grau):
-                        if lower_grau in self.agent.pedidos:
-                            # Procura e remove a posição do grau inferior, se existir
-                            for pedido in self.agent.pedidos[lower_grau]:
-                                if pedido["position"] == position:
-                                    self.agent.pedidos[lower_grau].remove(pedido)
-                                    print(f"Pedido removido do grau {lower_grau}: {pedido}")
-                                    break
+                    # Adiciona o pedido ao grau atual
+                    if grau not in self.agent.pedidos:
+                        self.agent.pedidos[grau] = []
 
-                # Adiciona o pedido ao grau atual
-                if grau not in self.agent.pedidos:
-                    self.agent.pedidos[grau] = []  # Inicializa a lista para o grau, se necessário
+                    self.agent.pedidos[grau].append({
+                        "position": position,
+                        "civilian_id": civilian_id,
+                        "estado": "pendente"
+                    })
 
-                self.agent.pedidos[grau].append({
-                    "position": position,
-                    "civilian_id": civilian_id,
-                    "tipo": "pendente"  # Placeholder para o tipo de pedido
-                })
+                    print(f"Pedido adicionado ao grau {grau}: {self.agent.pedidos[grau]}")
 
-                print(f"Pedido adicionado ao grau {grau}: {self.agent.pedidos[grau]}")
-                print(f"Pedidos organizados por grau: {self.agent.pedidos}")
+                    # Remove a mensagem do buffer após processá-la
+                    self.agent.message_buffer["request"].remove(msg)
+                    break  # Sai do loop após processar uma mensagem válida
+            else:
+                print("Nenhuma mensagem válida para este agenteeee.")
+
+            await asyncio.sleep(10)  # Aguarda 10 segundos antes de verificar novamente
 
     class HandleHelpRequests(CyclicBehaviour):
         async def run(self):
             """Lida com os pedidos de ajuda, priorizando graus mais altos."""
             if self.agent.ocupado:
+                print("Estou ocupado")
                 return  # Ignora se o agente está ocupado
 
-            msg = await self.receive(timeout=5)
+            #msg = await self.receive(timeout=10)
 
             # Ordena os graus de urgência em ordem decrescente (grau mais alto primeiro)
             for grau in sorted(self.agent.pedidos.keys(), reverse=True):
@@ -82,6 +114,9 @@ class ResponderAgent(Agent):
 
                     # Verifica se o Civilian já foi atendido
                     civilian_id = closest_pedido["civilian_id"]
+
+                    await asyncio.sleep(2)
+
                     if await self.is_civilian_attended(civilian_id):
                         print(f"O Civilian {civilian_id} já foi atendido. Ignorando o pedido.")
                         continue  # Passa para o próximo pedido na lista
@@ -93,6 +128,8 @@ class ResponderAgent(Agent):
                     self.agent.ocupado = False
                     return  # Sai após processar um pedido válido
 
+            await asyncio.sleep(10)
+
         async def is_civilian_attended(self, civilian_id):
             """Consulta o Civilian para verificar se ele já foi atendido."""
             msg = Message(to=civilian_id)
@@ -101,12 +138,19 @@ class ResponderAgent(Agent):
             await self.send(msg)
             print(f"Consultando o estado do Civilian {civilian_id}.")
 
-            # Aguarda a resposta do Civilian
-            reply = await self.receive(timeout=5)
-            #print("REPLY de atendido: ", reply)
-            if reply and reply.body == "atendido":
-                print(f"O Civilian {civilian_id} informou que já foi atendido.")
-                return True
+            await asyncio.sleep(2)
+
+            # Itera sobre as mensagens no buffer de "inform"
+            for msg in self.agent.message_buffer["inform"]:
+                if str(self.agent.jid) == str(msg.to):
+                    if msg.body == "atendido":  # Verifica destinatário e estado
+                        print(f"O Civilian {civilian_id} informou que já foi atendido.")
+                        self.agent.message_buffer["inform"].remove(msg)  # Remove a mensagem processada
+                        return True
+                    else:
+                        print(f"O Civilian {civilian_id} não foi atendido.")
+                        self.agent.message_buffer["inform"].remove(msg)  # Remove a mensagem processada
+                        return False
 
             print(f"O Civilian {civilian_id} não foi atendido ou não respondeu.")
             return False
@@ -117,28 +161,27 @@ class ResponderAgent(Agent):
             civil_position = pedido["position"]
             civil_id = pedido["civilian_id"]
 
+            pedido["estado"] = "em_andamento"
+
             msg = Message(to=civil_id)
             msg.body = f"Atendido {self.agent.position}"
             msg.set_metadata("performative", "inform")
             await self.send(msg)
-            print(f"Mensagem de atendimento enviada ao Civilian {civil_id}.")
+            print(f"O {self.agent.jid} mandou mensagem de atendimento enviada ao Civilian {civil_id}.")
 
-            # Aguarda uma resposta do Civilian
-            reply = await self.receive(timeout=10)  # Espera até 10 segundos por uma resposta
-            #print("REPLY: ",reply)
-            if reply and reply.get_metadata("performative") == "confirm" and reply.body == "Confirmado":
-                print(f"Responder {self.agent.jid}: Civilian {civil_id} confirmou o atendimento. Prosseguindo.")
-            else:
-                print(
-                    f"Responder {self.agent.jid}: Nenhuma confirmação recebida do Civilian {civil_id}. Tentando outro pedido.")
-                # Se nenhuma resposta foi recebida, escolhe outro pedido
-                closest_pedido = self.find_closest_pedido(grau)
-                if not closest_pedido:
-                    print(f"Responder {self.agent.jid}: Nenhum outro pedido disponível no grau {grau}.")
-                    return  # Sai se não houver mais pedidos no grau
-                pedido = closest_pedido
-                print("CLOSEST PEDIDO: ", pedido)
-                return
+            await asyncio.sleep(2)
+
+            # Itera sobre as mensagens no buffer de "confirm"
+            for msg in self.agent.message_buffer["confirm"]:
+                if str(self.agent.jid) == str(msg.to):
+                    if msg.body == "Confirmado":  # Verifica destinatário e conteúdo
+                        print(f"Responder {self.agent.jid}: Civilian {civil_id} confirmou o atendimento. Prosseguindo.")
+                        self.agent.message_buffer["confirm"].remove(msg)  # Remove a mensagem processada
+                    else:
+                        print(
+                            f"{self.agent.jid}: Nenhuma confirmação recebida do Civilian {civil_id}. Liberando o pedido.")
+                        #pedido["estado"] = "pendente"  # Libera o pedido novamente
+                        return
 
             # Calcula o caminho até o Civilian
             path = self.agent.calculate_path(civil_position)
@@ -147,7 +190,10 @@ class ResponderAgent(Agent):
                 return
 
             # Move até o Civilian
-            await self.agent.follow_path(path, civil_position)
+            await self.agent.follow_path(path, tuple(civil_position))
+
+            pedido["estado"] = "concluído"
+            print(f"{self.agent.jid}: Pedido do Civilian {civil_id} concluído com sucesso.")
 
             # Confirmar chegada e solicitar shelter
             await self.confirm_arrival(civil_id)
@@ -173,6 +219,9 @@ class ResponderAgent(Agent):
             closest_pedido = None
             min_distance = float("inf")
             for pedido in pedidos:
+                if pedido["estado"] != "pendente":  # Ignora pedidos já em andamento ou concluídos
+                    continue
+
                 civil_position = pedido["position"]
                 distance = abs(self.agent.position[0] - civil_position[0]) + abs(
                     self.agent.position[1] - civil_position[1])
@@ -188,6 +237,7 @@ class ResponderAgent(Agent):
         print(f"Responder Agent iniciado na posição {self.position}.")
         self.add_behaviour(self.ResponderBehaviour())  # Comportamento para escutar pedidos
         self.add_behaviour(self.HandleHelpRequests())  # Comportamento para lidar com os pedidos
+        self.add_behaviour((self.MessageRouterBehaviour()))
 
 
 
@@ -200,12 +250,12 @@ class ResponderAgent(Agent):
         """Segue o caminho calculado até a posição alvo."""
         for next_position in path[1:]:
             if next_position == target_position:
-                self.environment.move_agent(tuple(self.position), next_position, agent_type=7)
+                self.environment.move_agent(tuple(self.position), next_position, agent_type=3)
                 self.update_position(next_position)
                 print(f"{self.jid} chegou ao civilian.")
 
-            if self.environment.is_road_free(next_position):
-                self.environment.move_agent(tuple(self.position), next_position, agent_type=7)
+            elif self.environment.is_road_free(next_position):
+                self.environment.move_agent(tuple(self.position), next_position, agent_type=3)
                 self.update_position(next_position)
                 print(f"{self.jid} movido para {next_position}.")
 
@@ -257,7 +307,7 @@ class CivilianAgent(Agent):
                         responder_id = str(msg.sender)
                         responder_position = eval(" ".join(parts[1:]))  # Exemplo: posição no metadado
                         respostas.append({"id": responder_id, "position": responder_position})
-                        print(respostas)
+                        print(f"{self.agent.jid} {respostas}")
 
             if respostas:
                 # Avalia qual responder está mais próximo
